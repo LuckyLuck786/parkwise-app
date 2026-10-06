@@ -16,6 +16,7 @@ node_modules/
 dist/
 .vite/
 *.local
+*.tsbuildinfo
 
 # Env & secrets
 .env
@@ -29,3 +30,5 @@ nohup.out
 
 # Freebuff client state
 .freebuff/
+.vercel
+.env*

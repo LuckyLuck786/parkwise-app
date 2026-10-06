@@ -1,0 +1,10 @@
+# Vercel Python runtime installs this at the project root.
+# Runtime dependencies only (no uvicorn/pytest — those are for local dev).
+fastapi>=0.115.0
+sqlalchemy>=2.0.23
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt==5.0.0
+python-multipart>=0.0.6

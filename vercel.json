@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "fastapi",
+  "buildCommand": "cd frontend && npm install && npm run build && rm -rf ../public && cp -r dist ../public",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    { "source": "/((?!api/|assets/|docs|redoc|openapi).*)", "destination": "/index.html" }
+  ]
+}

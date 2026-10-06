@@ -8,6 +8,7 @@ import sys
 import os
 import random
 import json
+import uuid
 from datetime import datetime, timedelta, timezone
 
 # Ensure we can import from backend
@@ -20,6 +21,20 @@ from app.db.models import (
     DeviceKind, DeviceStatus,
 )
 from app.core.security import get_password_hash
+
+
+_SEED_NS = uuid.uuid5(uuid.NAMESPACE_URL, "parkwise.demo.seed.v1")
+
+
+def _stable_id(kind: str, key: str) -> str:
+    """Deterministic row id (uuid5 of a natural key).
+
+    Serverless deployments may seed the database on more than one instance;
+    deterministic ids keep every instance's seeded users/lots/bays identical
+    so a JWT issued by one instance still resolves on another. Ids are only
+    assigned at creation — existing rows are never touched.
+    """
+    return str(uuid.uuid5(_SEED_NS, f"{kind}:{key}"))
 
 
 def get_or_create(session, model, defaults=None, **kwargs):
@@ -287,7 +302,8 @@ def seed():
         buildings: dict[str, Building] = {}
         for bd in BUILDINGS:
             b, created = get_or_create(session, Building, name=bd["name"],
-                                       defaults={"lat": bd["lat"], "lng": bd["lng"]})
+                                       defaults={"id": _stable_id("building", bd["name"]),
+                                                 "lat": bd["lat"], "lng": bd["lng"]})
             buildings[b.name] = b
             if created:
                 print(f"  + {b.name}")
@@ -297,8 +313,9 @@ def seed():
         lots: dict[str, Lot] = {}
         for ld in LOTS:
             lot, created = get_or_create(session, Lot, name=ld["name"],
-                                         defaults={"capacity": ld["capacity"],
-                                                    "lat": ld["lat"], "lng": ld["lng"]})
+                                         defaults={"id": _stable_id("lot", ld["name"]),
+                                                   "capacity": ld["capacity"],
+                                                   "lat": ld["lat"], "lng": ld["lng"]})
             lots[lot.name] = lot
             if created:
                 print(f"  + {lot.name} ({lot.capacity} bays)")
@@ -315,7 +332,10 @@ def seed():
             _, created = get_or_create(
                 session, Bay,
                 lot_id=bd["lot_id"], label=bd["label"],
-                defaults={k: v for k, v in bd.items() if k not in ("lot_id", "label")},
+                defaults={
+                    "id": _stable_id("bay", bd["label"]),
+                    **{k: v for k, v in bd.items() if k not in ("lot_id", "label")},
+                },
             )
             if created:
                 bay_count += 1
@@ -367,6 +387,7 @@ def seed():
             user, created = get_or_create(
                 session, User, email=ud["email"],
                 defaults={
+                    "id": _stable_id("user", ud["email"]),
                     "name": ud["name"],
                     "password_hash": pw_hash,
                     "role": ud["role"],
@@ -381,6 +402,7 @@ def seed():
                 veh, v_created = get_or_create(
                     session, Vehicle, plate_or_tag_id=plate,
                     defaults={
+                        "id": _stable_id("vehicle", plate),
                         "user_id": user.id,
                         "type": vtype,
                         "active_today": False,
@@ -394,7 +416,8 @@ def seed():
         print("Seeding rules …")
         for key, value, desc in DEFAULT_RULES:
             _, created = get_or_create(session, Rule, key=key,
-                                       defaults={"value": value, "description": desc})
+                                       defaults={"id": _stable_id("rule", key),
+                                                 "value": value, "description": desc})
             if created:
                 print(f"  + {key}")
 
@@ -409,6 +432,7 @@ def seed():
             _, created = get_or_create(
                 session, Device, name=dname,
                 defaults={
+                    "id": _stable_id("device", dname),
                     "kind": dkind,
                     "api_key_hash": get_password_hash(api_key),
                     "status": DeviceStatus.online,
