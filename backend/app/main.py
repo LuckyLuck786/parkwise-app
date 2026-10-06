@@ -1,4 +1,4 @@
-"""ParkWise FastAPI application (Phase 1 skeleton: data model + health)."""
+"""ParkWise FastAPI application (Phase 4: ingestion endpoints live)."""
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -21,6 +21,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+from app.api.ingest import router as ingest_router  # noqa: E402
+
+app.include_router(ingest_router)
 
 
 @app.get("/api/v1/health")
