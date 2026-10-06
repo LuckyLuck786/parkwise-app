@@ -102,14 +102,51 @@ def run_rush(
     if not vehicles:
         return {"success": False, "message": "No driver vehicles seeded", "results": []}
 
+    # Skip drivers who already hold a bay: a rush must produce fresh activity,
+    # and the engine would (correctly) reject their second scan anyway.
+    holders = {
+        row[0]
+        for row in (
+            db.query(User.id)
+            .join(Vehicle, Vehicle.user_id == User.id)
+            .join(Allotment, Allotment.vehicle_id == Vehicle.id)
+            .filter(Allotment.status.in_([AllotmentStatus.allotted, AllotmentStatus.occupied]))
+            .distinct()
+            .all()
+        )
+    }
+    available = [v for v in vehicles if v.user_id not in holders]
+    skipped_holding = len(vehicles) - len(available)
+    if not available:
+        return {
+            "success": False,
+            "message": "Every seeded driver already holds a bay — reset the demo first.",
+            "results": [],
+            "skipped_holding": skipped_holding,
+        }
+
     rng = random.Random(7)
-    roster = list(vehicles)
+    # At most one vehicle per driver: two scans from the same account would
+    # (correctly) be rejected by the one-bay-per-account rule and just add noise.
+    seen_users: set = set()
+    roster = []
+    for v in sorted(available, key=lambda veh: veh.id):
+        if v.user_id in seen_users:
+            continue
+        seen_users.add(v.user_id)
+        roster.append(v)
     rng.shuffle(roster)
     roster = roster[: max(1, count)]
 
     base = get_virtual_now(db) + timedelta(minutes=start_minute_offset)
     buildings = db.query(Building).all()
     dest_id = dest_building_id or (buildings[0].id if buildings else None)
+
+    # The simulated devices are alive while the scenario runs: heartbeat them
+    # so the confidence model sees a live fleet (real agents send their own).
+    for dev in db.query(Device).all():
+        dev.last_heartbeat = as_utc_naive(utcnow())
+    db.commit()
 
     results: List[Dict[str, Any]] = []
     for i, vehicle in enumerate(roster):
@@ -161,6 +198,7 @@ def run_rush(
         "count": len(results),
         "allotted": allotted,
         "waitlisted": waitlisted,
+        "skipped_holding": skipped_holding,
         "window_start": base.isoformat(),
         "gap_seconds": gap_seconds,
         "results": results,

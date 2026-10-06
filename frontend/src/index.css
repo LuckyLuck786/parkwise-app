@@ -1,0 +1,117 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ *
+ * Base: readable defaults, visible keyboard focus everywhere.
+ * ------------------------------------------------------------------ */
+:root {
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-900 antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+}
+
+*:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.skip-link {
+  @apply sr-only;
+}
+.skip-link:focus {
+  @apply fixed left-3 top-3 z-50 rounded bg-brand-600 px-4 py-2 text-white shadow-lg;
+}
+
+/* ------------------------------------------------------------------ *
+ * Components
+ * ------------------------------------------------------------------ */
+@layer components {
+  .card {
+    @apply rounded-xl border border-slate-200 bg-white p-4 shadow-card sm:p-5;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-700;
+  }
+  .btn-secondary {
+    @apply btn border border-slate-300 bg-white text-slate-800 hover:bg-slate-100;
+  }
+  .btn-danger {
+    @apply btn bg-rose-600 text-white hover:bg-rose-700;
+  }
+  .input {
+    @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm placeholder:text-slate-400 focus:border-brand-500;
+  }
+  .label {
+    @apply mb-1 block text-sm font-medium text-slate-700;
+  }
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold;
+  }
+  .th {
+    @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500;
+  }
+  .td {
+    @apply px-3 py-2 text-sm text-slate-700;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * High contrast mode — deliberately blunt: pure colors, heavy borders.
+ * Enabled from the toolbar and remembered in localStorage.
+ * ------------------------------------------------------------------ */
+html[data-contrast="high"] body {
+  background: #ffffff;
+  color: #000000;
+}
+html[data-contrast="high"] .card {
+  border: 3px solid #000000;
+  background: #ffffff;
+  box-shadow: none;
+}
+html[data-contrast="high"] .btn-primary {
+  background: #0000cc;
+  border: 3px solid #000000;
+}
+html[data-contrast="high"] .btn-secondary {
+  border: 3px solid #000000;
+  color: #000000;
+}
+html[data-contrast="high"] .input {
+  border: 3px solid #000000;
+}
+html[data-contrast="high"] .pill {
+  border: 2px solid #000000;
+}
+html[data-contrast="high"] a {
+  text-decoration: underline;
+}
+html[data-contrast="high"] .bay-shape {
+  stroke: #000000 !important;
+  stroke-width: 2.5 !important;
+}
+html[data-contrast="high"] text.bay-label {
+  fill: #000000 !important;
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

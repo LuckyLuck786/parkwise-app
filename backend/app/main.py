@@ -40,7 +40,8 @@ app.add_middleware(
 from app.api import admin, auth, events, gate, ingest, lots, me, metrics, users  # noqa: E402
 
 for router in (auth.router, users.router, lots.router, events.router,
-               me.router, gate.router, admin.router, metrics.router, ingest.router):
+               me.router, gate.router, admin.router, admin.staff_router,
+               metrics.router, ingest.router):
     app.include_router(router)
 
 

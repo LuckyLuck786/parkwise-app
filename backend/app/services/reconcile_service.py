@@ -297,11 +297,16 @@ def bay_confidence_map(
 ) -> Dict[str, Dict[str, Any]]:
     """Per-bay confidence/state-source used for the low-confidence badge.
 
+    Sensors report *changes*, not periodic state, so a bay's last event being
+    old is normal. What matters is whether the devices are heartbeating:
+
     state_source:
-      * "sensor"         — a bay event arrived within the heartbeat window
-      * "scan_inferred"  — no recent sensor data; the state came from gate scans
-                           (offline fallback)
-      * "initial"        — no evidence at all (fresh/seeded state)
+      * "sensor"         — derived from a sensor observation while the fleet
+                           is online
+      * "scan_inferred"  — devices missed heartbeats (or there is no sensor
+                           evidence), so the state falls back to what the gate
+                           scans imply — this is what gets the badge
+      * "initial"        — no evidence at all (fresh/seeded free state)
     """
     if current_time is None:
         current_time = utcnow()
@@ -312,6 +317,13 @@ def bay_confidence_map(
         low_threshold = float(get_rule(db, "low_confidence_threshold", 0.6))
 
     window_start = current_time - timedelta(seconds=timeout_seconds)
+
+    # Is any sensor-capable device actually alive right now?
+    devices_online = any(
+        dev.status == DeviceStatus.online
+        and (_naive(dev.last_heartbeat) or datetime.min) >= window_start
+        for dev in db.query(Device).all()
+    )
 
     latest: Dict[str, BayEvent] = {}
     for ev in (
@@ -328,22 +340,34 @@ def bay_confidence_map(
     for bay in db.query(Bay).all():
         ev = latest.get(bay.id)
         ev_ts = _naive(ev.ts) if ev else None
+
         if ev is not None and ev_ts is not None and ev_ts >= window_start:
+            # Fresh observation.
+            confidence = float(ev.confidence)
+            source = "sensor"
+        elif ev is not None and devices_online:
+            # Old observation, but the fleet is alive: sensors only report
+            # changes, so we still trust the last reading.
             confidence = float(ev.confidence)
             source = "sensor"
         elif ev is not None:
-            # stale sensor data -> state is scan-inferred
+            # Devices went quiet -> scan-inferred with a low-confidence badge.
             confidence = min(float(ev.confidence), 0.5)
             source = "scan_inferred"
         else:
-            confidence = 1.0 if bay.state == BayState.free else 0.5
-            source = "initial" if bay.state == BayState.free else "scan_inferred"
+            if bay.state in (BayState.free, BayState.allotted):
+                confidence = 1.0
+                source = "initial" if bay.state == BayState.free else "scan_inferred"
+            else:
+                confidence = 1.0 if devices_online else 0.5
+                source = "sensor" if devices_online else "scan_inferred"
 
         out[bay.id] = {
             "confidence": round(confidence, 2),
             "state_source": source,
             "low_confidence": bool(confidence < low_threshold),
             "last_sensor_ts": ev_ts.isoformat() if ev_ts else None,
+            "devices_online": devices_online,
         }
     return out
 

@@ -39,6 +39,13 @@ router = APIRouter(
     dependencies=[Depends(require_admin)],
 )
 
+# Staff-level endpoints (admin AND gate operator) — no router-wide admin guard.
+staff_router = APIRouter(
+    prefix="/api/v1/staff",
+    tags=["Staff"],
+    dependencies=[Depends(require_staff)],
+)
+
 
 # --------------------------------------------------------------------------- #
 # Rules
@@ -128,13 +135,13 @@ def users_list(db: Session = Depends(get_db)):
     ]
 
 
-@router.get("/vehicles")
+@staff_router.get("/vehicles")
 def vehicles_roster(
     vehicle_type: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    """Full roster with unmasked plates (admin only; used by the rush
-    simulator and the gate kiosk)."""
+    """Full roster with unmasked plates (admin + gate operator; used by the
+    rush simulator and the gate kiosk)."""
     query = db.query(Vehicle).join(User, Vehicle.user_id == User.id)
     if vehicle_type:
         query = query.filter(Vehicle.type == VehicleType(vehicle_type))

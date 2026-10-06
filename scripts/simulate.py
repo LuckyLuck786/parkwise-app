@@ -131,7 +131,7 @@ class ParkWiseSim:
 
     def vehicles(self, credentials: str) -> List[Dict[str, Any]]:
         resp = self.client.get(
-            f"{self.base_url}/api/v1/admin/vehicles",
+            f"{self.base_url}/api/v1/staff/vehicles",
             headers=self.auth_headers(credentials),
         )
         return self._check(resp)
