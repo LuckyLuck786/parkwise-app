@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# Local database (seedable, never commit data)
+*.db
+*.db-journal
+*.sqlite3
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.local
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+
+# Logs / OS
+*.log
+.DS_Store
+nohup.out
+
+# Freebuff client state
+.freebuff/
