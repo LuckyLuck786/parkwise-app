@@ -24,7 +24,7 @@ from app.db.models import (
     utcnow,
 )
 from app.schemas.auth import UserOut
-from app.services import analytics_service, demo_service, live_service, lot_service
+from app.services import analytics_service, demo_service, input_source, live_service, lot_service
 from app.services.reconcile_service import (
     check_device_heartbeats,
     get_active_conflicts,
@@ -395,6 +395,36 @@ def demo_fault(payload: FaultRequest, db: Session = Depends(get_db)):
 @router.post("/demo/reset")
 def demo_reset(db: Session = Depends(get_db)):
     return demo_service.reset_demo(db)
+
+
+# --------------------------------------------------------------------------- #
+# Input source (demo-day failure plan: one toggle)
+# --------------------------------------------------------------------------- #
+@router.get("/input-source")
+def get_input_source(db: Session = Depends(get_db)):
+    mode = input_source.get_mode(db)
+    return {
+        "mode": mode,
+        "modes": list(input_source.MODES),
+        "hardware_sources_paused": mode != "live",
+        "description": (
+            "live: simulator, IR, webcam and manual events are all accepted. "
+            "simulated_only: hardware sources are rejected so a misbehaving "
+            "device cannot affect a demo; simulator and manual keep working."
+        ),
+    }
+
+
+class InputSourceRequest(BaseModel):
+    mode: str = Field(pattern="^(live|simulated_only)$")
+
+
+@router.post("/input-source")
+def set_input_source(payload: InputSourceRequest, db: Session = Depends(get_db),
+                     user: User = Depends(require_admin)):
+    mode = input_source.set_mode(db, payload.mode, actor=user.email)
+    live_service.bump(db, "input_source")
+    return {"mode": mode, "hardware_sources_paused": mode != "live"}
 
 
 # --------------------------------------------------------------------------- #

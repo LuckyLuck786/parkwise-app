@@ -1,0 +1,5 @@
+# Edge agent (laptop only — NOT installed on the server)
+# Webcam / test-image occupancy detection for ParkWise.
+opencv-python>=4.9,<5
+numpy>=1.26
+httpx>=0.27

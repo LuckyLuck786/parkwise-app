@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   AlarmClock,
   CalendarClock,
+  Cpu,
   Play,
   RotateCcw,
   Timer,
@@ -324,6 +325,52 @@ export default function Simulator() {
             </button>
           ))}
         </div>
+      </section>
+
+      <section className="card">
+        <h2 className="mb-3 flex items-center gap-2 text-lg font-bold text-slate-800">
+          <Cpu className="h-5 w-5 text-brand-600" aria-hidden /> Input source
+          <StatusPill tone={state.input_source === "simulated_only" ? "amber" : "green"}>
+            {state.input_source === "simulated_only" ? "hardware paused" : "live"}
+          </StatusPill>
+        </h2>
+        <p className="mb-3 text-sm text-slate-600">
+          Demo-day kill-switch: pause <strong>hardware</strong> input (IR sensors, webcam) without
+          touching anything else. The simulator and manual overrides keep working through the same
+          ingestion endpoints. Audit-logged as <code>input_source_changed</code>.
+        </p>
+        <div className="flex flex-wrap gap-2" role="group" aria-label="Input source mode">
+          <button
+            type="button"
+            className={state.input_source !== "simulated_only" ? "btn-primary" : "btn-secondary"}
+            aria-pressed={state.input_source !== "simulated_only"}
+            disabled={busy}
+            onClick={() =>
+              void call("/api/v1/admin/input-source", { mode: "live" }, "Input source: live")
+            }
+          >
+            Live (all sources)
+          </button>
+          <button
+            type="button"
+            className={state.input_source === "simulated_only" ? "btn-danger" : "btn-secondary"}
+            aria-pressed={state.input_source === "simulated_only"}
+            disabled={busy}
+            onClick={() =>
+              void call(
+                "/api/v1/admin/input-source",
+                { mode: "simulated_only" },
+                "Input source: simulated only",
+              )
+            }
+          >
+            Simulated only (pause hardware)
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-slate-500">
+          While paused, bay-events or gate-scans from <code>ir_sensor</code>/<code>webcam</code>
+          get HTTP 409 with a clear message — a misbehaving device cannot affect the demo.
+        </p>
       </section>
 
       <section className="card">

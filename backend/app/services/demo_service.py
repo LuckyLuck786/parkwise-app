@@ -24,7 +24,7 @@ from app.db.models import (
     as_utc_naive,
     utcnow,
 )
-from app.services import ingest_service, live_service, notification_service
+from app.services import ingest_service, input_source, live_service, notification_service
 from app.services.clock_service import get_virtual_now, reset_clock, set_clock
 from app.services.noshow_service import check_and_release_noshows
 from app.services.rules_service import get_rule
@@ -52,6 +52,7 @@ def demo_state(db: Session) -> Dict[str, Any]:
             "notifications": db.query(notification_service.Notification).count(),
         },
         "version": live_service.get_version(db),
+        "input_source": input_source.get_mode(db),
     }
 
 

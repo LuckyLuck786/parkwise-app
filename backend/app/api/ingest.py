@@ -18,11 +18,26 @@ from app.schemas.ingest import (
     HeartbeatIngestRequest,
     IngestResponse,
 )
-from app.services import ingest_service
+from app.services import ingest_service, input_source
 from app.services.device_auth import authenticate_device
 from app.services.reconcile_service import get_active_conflicts
 
 router = APIRouter(prefix="/api/v1/ingest", tags=["Ingest"])
+
+
+def _assert_source_allowed(db: Session, source: Any) -> None:
+    """Demo-day failure plan: one admin toggle can pause hardware input."""
+    if not input_source.source_allowed(db, source):
+        name = getattr(source, "value", source)
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Hardware input is paused (input source = simulated_only). "
+                f"Source {name!r} rejected; simulator and manual events are "
+                "still accepted. An admin can re-enable hardware in the "
+                "Simulator panel."
+            ),
+        )
 
 
 @router.post("/bay-event", response_model=IngestResponse)
@@ -32,6 +47,7 @@ def ingest_bay_event(
     db: Session = Depends(get_db),
 ):
     """Normalized bay_occupancy {bay_id, occupied, source, confidence, ts}."""
+    _assert_source_allowed(db, payload.source)
     try:
         result = ingest_service.process_bay_event(db, device, payload.model_dump())
     except KeyError as exc:
@@ -54,6 +70,7 @@ def ingest_gate_scan(
     db: Session = Depends(get_db),
 ):
     """Normalized gate_scan {vehicle_tag_id, direction, source, ts}."""
+    _assert_source_allowed(db, payload.source)
     try:
         result = ingest_service.process_gate_scan(
             db, device, payload.model_dump(), actor=f"device:{device.name}"

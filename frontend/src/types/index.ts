@@ -293,4 +293,5 @@ export interface DemoState {
   clock: { virtual_now: string; real_now: string };
   counts: { free_bays: number; active_allotments: number; waitlist: number; notifications: number };
   version: number;
+  input_source?: "live" | "simulated_only";
 }
