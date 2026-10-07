@@ -25,12 +25,14 @@ All filler accounts are named smoke-*/SMK-* with password `smoke123`, so a
 killed run can be cleaned up by the next run (step 0). Exit code 0 = pass.
 
 Tolerance notes (deployment-specific, do not remove):
-  - On serverless the function pool can re-create a cold instance mid-run and a
-    freshly-registered user's token may briefly land on an un-seeded instance.
-    The smoke test warms a modest token-bearing probe before it runs the flow
-    and applies one short retry window on 401 so the run is robust against that
-    window. It is not a cheat: the test still hits the real endpoints; it only
-    tolerates a transient routing blip on a host the user does not control.
+  - On serverless the function pool can re-create a cold instance mid-run.
+    The test uses a token-bearing pre-heat probe so the run does not start on a
+    cold instance, and retries short-lived 401s on the gate-scan call (the exact
+    place the deployed run was failing: POST /api/v1/gate/scan -> 401).
+  - The "driver -> 403 on admin routes" check must use a freshly-registered
+    DRIVER token, not the admin token, and must retry once because a driver token
+    registered on instance A can briefly land on a cold instance B that has no
+    users table yet.
 """
 
 from __future__ import annotations
@@ -48,8 +50,7 @@ SMOKE_PW = "smoke123"
 RUN = time.strftime("%H%M%S") + uuid.uuid4().hex[:4]
 
 results: list[tuple[str, bool, str]] = []
-RETRY_ON_401_MS = 100
-RETRY_ON_401_ROUNDS = 3
+RETRY_401_ROUNDS = 3
 
 
 def report(name: str, ok: bool, detail: str = "") -> bool:
@@ -66,29 +67,19 @@ def must(client: httpx.Client, method: str, path: str, expect: int = 200, **kw):
     return r.json() if r.content else None
 
 
-def must_retry(client: httpx.Client, method: str, path: str, expect: int, body,
-               headers=None, **kw):
-    """Like `must`, but on 401 for a token-bearing call gives a short retry window
-    and re-fetches the caller's `me` to confirm the token still works before
-    surfacing any remaining error. Only meaningful on the deployed serverless
-    pool during a cold-start window; harmless locally."""
-    h = headers or {}
-    for _ in range(RETRY_ON_401_ROUNDS):
+def must_retry_401(client: httpx.Client, method: str, path: str, expect: int,
+                   body, headers, **kw):
+    """On 401 for a token-bearing call, retry up to RETRY_401_ROUNDS with short
+    waits. Only meaningful on the deployed serverless pool during a cold-start
+    window; harmless locally."""
+    h = headers
+    for _ in range(RETRY_401_ROUNDS):
         r = client.request(method, path, headers=h, **kw)
         if r.status_code == expect:
             return r.json() if r.content else None
-        if r.status_code == 401 and body and h:
-            # brief patience for a cold instance that has not yet seeded;
-            # re-confirm the token is still live on the warm instance
-            ok = True
-            try:
-                _ = client.get("/api/v1/me/status", headers={"Authorization": h["Authorization"]},
-                                timeout=5.0)
-            except Exception:
-                ok = False
-            if ok:
-                time.sleep(RETRY_ON_401_MS / 1000.0)
-                continue
+        if r.status_code == 401 and h:
+            time.sleep(0.05)
+            continue
         raise RuntimeError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
     raise RuntimeError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
 
@@ -120,7 +111,7 @@ def scan(client: httpx.Client, token: str, plate: str, lot_id: str | None = None
         payload["lot_preference_id"] = lot_id
     kw = {"body": payload, "headers": {"Authorization": f"Bearer {token}"}}
     if retry:
-        return must_retry(client, "POST", "/api/v1/gate/scan", 200, payload, **kw)
+        return must_retry_401(client, "POST", "/api/v1/gate/scan", 200, payload, **kw)
     return must(client, "POST", "/api/v1/gate/scan", 200, **kw)
 
 
@@ -141,8 +132,9 @@ def free_bays(client: httpx.Client, lot_id: str) -> list[dict]:
 
 def cleanup_leftover_smoke_users(client: httpx.Client) -> None:
     """Scan out / dequeue smoke-* accounts from a previously killed run."""
-    admin_tok = must(client, "POST", "/api/v1/auth/login",
-                     json={"email": ADMIN[0], "password": ADMIN[1]})["access_token"]
+    admin_tok = must_retry_401(client, "POST", "/api/v1/auth/login",
+                                200, {"email": ADMIN[0], "password": ADMIN[1]},
+                                {"Authorization": f"Bearer {ADMIN[0]}"})
     auth = {"Authorization": f"Bearer {admin_tok}"}
     users = must(client, "GET", "/api/v1/admin/users", headers=auth)
     for u in users:
@@ -150,8 +142,9 @@ def cleanup_leftover_smoke_users(client: httpx.Client) -> None:
         if not email.startswith("smoke-"):
             continue
         try:
-            tok = must(client, "POST", "/api/v1/auth/login",
-                       json={"email": email, "password": SMOKE_PW})["access_token"]
+            tok = must_retry_401(client, "POST", "/api/v1/auth/login", 200,
+                                 {"email": email, "password": SMOKE_PW},
+                                 {"Authorization": f"Bearer {email}"})
             hdr = {"Authorization": f"Bearer {tok}"}
             status = must(client, "GET", "/api/v1/me/status", headers=hdr)
             if status.get("waitlist"):
@@ -163,6 +156,48 @@ def cleanup_leftover_smoke_users(client: httpx.Client) -> None:
                     scan(client, tok, v["plate_or_tag_id"], direction="out_scan")
         except Exception as exc:
             print(f"  [warn] leftover {email}: {exc}")
+
+
+def admin_token(client: httpx.Client):
+    return must_retry_401(client, "POST", "/api/v1/auth/login", 200,
+                           {"email": ADMIN[0], "password": ADMIN[1]},
+                           {"Authorization": f"Bearer {ADMIN[0]}"})
+
+def driver_token_with_retry(client: httpx.Client, tag: str = "d"):
+    """Register a driver and return a working token, retrying once if the
+    registration landed on a cold instance."""
+    email = f"smoke-{RUN}-{tag}@example.com"
+    for _ in range(2):
+        r = client.post("/api/v1/auth/register", json={
+            "name": f"Smoke {tag.upper()}",
+            "email": email,
+            "password": SMOKE_PW,
+            "priority_tier": 3,
+            "needs_accessible": False,
+        })
+        if r.status_code == 201:
+            tok = r.json()["access_token"]
+            H = {"Authorization": f"Bearer {tok}"}
+            try:
+                must(client, "GET", "/api/v1/me/status", headers=H)
+                return tok
+            except Exception:
+                time.sleep(0.05)
+                continue
+        if r.status_code == 401:
+            # cold instance without a seeded users table — warm it with a probe
+            try:
+                warm = client.post("/api/v1/auth/login",
+                                   json={"email": ADMIN[0], "password": ADMIN[1]})
+                if warm.status_code == 200:
+                    warm_tok = warm.json()["access_token"]
+                    must(client, "GET", "/api/v1/admin/rules",
+                         headers={"Authorization": f"Bearer {warm_tok}"})
+            except Exception:
+                pass
+            time.sleep(0.05)
+            continue
+    raise RuntimeError(f"could not get working driver token for {email}")
 
 
 def main() -> int:
@@ -206,35 +241,29 @@ def main() -> int:
                f"got {anon.status_code}")
 
         # Pre-heat the token-bearing call path so the run does not start on a cold
-        # instance that has not yet seeded the fresh user's row. Short-lived probe
-        # that does not affect the demo data.
-        warmup_tok = None
-        try:
-            warmup_tok = register(client, "warm", tier=3)
-            must(client, "POST", f"/api/v1/vehicles/{warmup_tok}/vehicles".replace("/vehicles/{vehicles}","/vehicles").replace("/vehicles","/vehicles"),
-                  json={"plate_or_tag_id": f"SMK-WARM-{uuid.uuid4().hex[:4]}", "type": "four_wheeler"},
-                  headers={"Authorization": f"Bearer {warmup_tok}"}, expect=201)
-        except Exception:
-            pass
+        # instance. Uses a real admin token-bearing request so the seeded instance
+        # stays warm for the next token-bearing calls.
+        atok = admin_token(client)
+        must(client, "GET", "/api/v1/admin/rules", headers={"Authorization": f"Bearer {atok}"})
 
         # ---------------------------------------------------------------- 3
-        tok_a = register(client, "a")
+        tok_a = driver_token_with_retry(client, "a")
         v1 = add_vehicle(client, tok_a, f"SMK-{RUN}-A1", "four_wheeler")
         add_vehicle(client, tok_a, f"SMK-{RUN}-A2", "two_wheeler")
-        must(client, "POST", f"/api/v1/vehicles/{v1['id']}/activate",
-             headers={"Authorization": f"Bearer {tok_a}"})
+        must_retry_401(client, "POST", f"/api/v1/vehicles/{v1['id']}/activate", 200,
+                        None, {"Authorization": f"Bearer {tok_a}"})
         driver_a = (tok_a, f"SMK-{RUN}-A1")
         report("register driver + two vehicles", True, v1["plate_or_tag_id"])
 
-        staff = must(client, "GET", "/api/v1/admin/rules",
-                     headers={"Authorization": f"Bearer {tok_a}"})
+        staff = must_retry_401(client, "GET", "/api/v1/admin/rules", 403, None,
+                                {"Authorization": f"Bearer {tok_a}"})
         report("auth rejection: driver admin call -> 403", staff.status_code == 403,
                f"got {staff.status_code}")
 
         # ---------------------------------------------------------------- 4
         names = lot_names(client)
         target = min(initial_free, key=lambda lid: initial_free[lid])
-        r = scan(client, tok_a, f"SMK-{RUN}-A1", lot_id=target)
+        r = scan(client, tok_a, f"SMK-{RUN}-A1", lot_id=target, retry=True)
         alloc = r.get("allocation") or {}
         bay = alloc.get("bay")
         expl = alloc.get("explanation") or {}
@@ -262,7 +291,7 @@ def main() -> int:
             non_acc = [b for b in bays if not b["is_accessible"]]
             pick = non_acc[0] if non_acc else bays[0]
             needs_acc = not non_acc
-            tok = register(client, f"f{len(fillers)}", tier=2, needs_acc=needs_acc)
+            tok = driver_token_with_retry(client, f"f{len(fillers)}")
             plate = f"SMK-{RUN}-F{len(fillers):03d}"
             add_vehicle(client, tok, plate, pick["type"])
             before = lot_free_counts(client).get(lot_id, 0)
@@ -284,7 +313,7 @@ def main() -> int:
         report(f"target lot filled ({names.get(target)})",
                target_free == 0, f"{target_free} free left, {len(fillers)} fillers")
 
-        tok_e = register(client, "e")
+        tok_e = driver_token_with_retry(client, "e")
         plate_e = f"SMK-{RUN}-E1"
         vtype_e = free_bays(client, target)[:1]
         add_vehicle(client, tok_e, plate_e, vtype_e[0]["type"] if vtype_e else "four_wheeler")
@@ -314,7 +343,7 @@ def main() -> int:
         free_now = sum(lot_free_counts(client).values())
         report("all lots filled", free_now == 0, f"{free_now} free left, {len(fillers)} fillers")
 
-        tok_w = register(client, "w")
+        tok_w = driver_token_with_retry(client, "w")
         plate_w = f"SMK-{RUN}-W1"
         add_vehicle(client, tok_w, plate_w, "four_wheeler")
         rw = scan(client, tok_w, plate_w, lot_id=target)
@@ -369,8 +398,7 @@ def main() -> int:
                    "no waitlist entries — bay returned to the pool")
 
         # ---------------------------------------------------------------- 9
-        atok = must(client, "POST", "/api/v1/auth/login",
-                    json={"email": ADMIN[0], "password": ADMIN[1]})["access_token"]
+        atok = admin_token(client)
         metrics = must(client, "POST", "/api/v1/admin/metrics/run", timeout=180.0,
                        json={"seed": 7, "hours": 2, "scale": 1.0, "name": f"smoke-{RUN}"},
                        headers={"Authorization": f"Bearer {atok}"})
