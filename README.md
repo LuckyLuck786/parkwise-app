@@ -39,9 +39,9 @@ The Vite dev server proxies `/api` to `:8010`. Optional env: see
 |---|---|---|
 | Admin | `admin@parkwise.edu` | `admin123` |
 | Gate operator | `gate1@parkwise.edu` | `gate123` |
-| Driver — Tier 1 (accessible) | `priya.sharma@parkwise.edu` | `pass123` |
-| Driver — Tier 2 (faculty) | `anand.rao@parkwise.edu` | `pass123` |
-| Driver — Tier 3 (student) | `amit.kumar@parkwise.edu` | `pass123` |
+| Driver — Tier 1 (accessible) | `priya.sharma@example.com` | `pass123` |
+| Driver — Tier 2 (faculty) | `anand.rao@example.com` | `pass123` |
+| Driver — Tier 3 (student) | `amit.kumar@example.com` | `pass123` |
 
 The login page has one-click demo buttons that fill these in.
 
@@ -152,6 +152,11 @@ backend changes**.
 - **Deployment state is ephemeral** on the default setup (SQLite per
   instance); set `DATABASE_URL` for durability. Seeded demo data regenerates
   deterministically otherwise.
+- **A freshly registered account can 401 for a few seconds on the deployed
+  pool**: Vercel may serve the next request from a warm instance that does not
+  know a user created on another one (seeded demo logins are unaffected —
+  their ids are deterministic uuid5s). `scripts/smoke_test.py` retries these
+  short-lived 401s; a shared `DATABASE_URL` removes the window completely.
 - **ESP32 sketch is unverified on hardware** — written to spec, syntax
   sanity-checked, but never compiled/flashed (no Arduino toolchain here).
 - **Webcam agent tested on synthetic images**, not a physical camera feed;

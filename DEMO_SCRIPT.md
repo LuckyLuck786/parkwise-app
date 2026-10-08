@@ -9,9 +9,9 @@ Stage props: projector with the app open (deployed + local tabs warmed).
 |---|---|---|
 | Admin | `admin@parkwise.edu` | `admin123` |
 | Gate operator | `gate1@parkwise.edu` | `gate123` |
-| Driver (Tier 1, accessible) | `priya.sharma@parkwise.edu` | `pass123` |
-| Driver (Tier 2, faculty) | `anand.rao@parkwise.edu` | `pass123` |
-| Driver (Tier 3, student) | `amit.kumar@parkwise.edu` | `pass123` |
+| Driver (Tier 1, accessible) | `priya.sharma@example.com` | `pass123` |
+| Driver (Tier 2, faculty) | `anand.rao@example.com` | `pass123` |
+| Driver (Tier 3, student) | `amit.kumar@example.com` | `pass123` |
 
 In-app demo buttons on the login page fill these in with one click.
 
