@@ -2,6 +2,9 @@
 # Runtime dependencies only (no uvicorn/pytest — those are for local dev).
 fastapi>=0.115.0
 sqlalchemy>=2.0.23
+# Postgres driver for the optional durable-state switch (DATABASE_URL).
+# bare postgresql:// URLs are normalised to postgresql+psycopg:// in config.py
+psycopg[binary]>=3.1.18
 pydantic>=2.5.0
 pydantic-settings>=2.1.0
 python-jose[cryptography]>=3.3.0

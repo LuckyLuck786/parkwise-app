@@ -2,11 +2,17 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 from app.core.config import settings
 
-connect_args = {"check_same_thread": False} if settings.DATABASE_URL.startswith("sqlite") else {}
+IS_SQLITE = settings.DATABASE_URL.startswith("sqlite")
+connect_args = {"check_same_thread": False} if IS_SQLITE else {}
 
-engine = create_engine(
-    settings.DATABASE_URL, connect_args=connect_args
-)
+engine_kwargs: dict = {"connect_args": connect_args}
+if not IS_SQLITE:
+    # Serverless (Vercel) + a pooled Postgres proxy idles connections out, so every
+    # instance keeps a tiny pool and drops stale sockets instead of erroring.
+    engine_kwargs.update(pool_pre_ping=True, pool_recycle=280,
+                         pool_size=2, max_overflow=2)
+
+engine = create_engine(settings.DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()

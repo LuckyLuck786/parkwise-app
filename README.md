@@ -115,11 +115,21 @@ demo data).
   into `public/`; the FastAPI framework preset serves `/` with a SPA
   fallback rewrite (no `/api` rewrite needed — routes live under `/api/v1/*`
   on the app itself).
-- **State:** deployed on ephemeral SQLite with a deterministic seed
-  (resets on cold start; instance divergence handled by stable ids). Set
-  `DATABASE_URL` (e.g. Neon Postgres) to make state durable — the code path
-  already exists in `backend/app/core/config.py`; Mongo/other non-SQL stores
-  are *not* supported (the schema is relational).
+- **State:** deployed on ephemeral SQLite with a deterministic seed (resets on
+  cold start). Stable uuid5 ids keep the *seeded* demo data identical on every
+  instance, so the demo logins work anywhere. Rows created at runtime (a new
+  sign-up, its vehicles, its allotment) exist only on the instance that served
+  the write, so a second warm instance answers 401/404 while that instance is
+  still in the pool. The frontend retries a 401 briefly before logging out, and
+  `scripts/smoke_test.py` retries token-bearing calls.
+- **Make state durable (removes the divergence entirely):** set `DATABASE_URL`
+  on Vercel to a Postgres URL (Neon's pooled
+  `postgresql://user:pass@host/db?sslmode=require` works as-is) and redeploy.
+  `psycopg` ships in [requirements.txt](requirements.txt) and bare
+  `postgresql://` URLs are normalised to the psycopg3 driver; the serverless
+  pool is pre-pinged, tables are created and seeded on the first cold start, and
+  all 15 tables compile for the Postgres dialect (verified).
+  Mongo/other non-SQL stores are *not* supported (the schema is relational).
 - **`SECRET_KEY`** is set as a Vercel production environment variable.
 - **SSE:** `/api/v1/events/stream` works where functions allow long-lived
   responses; the frontend falls back to `GET /api/v1/events/poll`

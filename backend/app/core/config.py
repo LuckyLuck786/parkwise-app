@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repository root (parkwise/), regardless of the process working directory.
@@ -42,5 +44,20 @@ class Settings(BaseSettings):
     CORS_ORIGINS: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+
+    @field_validator("DATABASE_URL", mode="after")
+    @classmethod
+    def _point_postgres_at_psycopg(cls, url: str) -> str:
+        """Send bare postgres:// URLs to psycopg 3 — the only driver we ship.
+
+        Neon/Render/Supabase hand out `postgresql://user:pass@host/db?sslmode=...`
+        and SQLAlchemy would look for psycopg2 (also possible, but not installed).
+        SQLite URLs are untouched.
+        """
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                return "postgresql+psycopg://" + url[len(prefix):]
+        return url
+
 
 settings = Settings()

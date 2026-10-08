@@ -3,11 +3,20 @@
  *
  * - Attaches the JWT when present
  * - Turns FastAPI error payloads into Error objects with a readable message
- * - Clears the session on 401 and sends the user to /login
+ * - Retries a 401 briefly, then clears the session and sends the user to /login
+ *
+ * Why retry a 401: on the deployed serverless pool each warm instance keeps its
+ * own SQLite file, so the first call after a fresh sign-up can land on an
+ * instance that has not seen the new account yet. A genuinely expired token
+ * still fails after the retries and logs out exactly as before.
  */
 
 const TOKEN_KEY = "parkwise.token";
 const USER_KEY = "parkwise.user";
+const RETRY_401_ATTEMPTS = 3;
+const RETRY_401_DELAY_MS = 250;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class ApiError extends Error {
   status: number;
@@ -71,32 +80,40 @@ export async function api<T>(path: string, options: RequestOptions = {}): Promis
   const token = getToken();
   if (auth && token) headers.Authorization = `Bearer ${token}`;
 
-  let res: Response;
-  try {
-    res = await fetch(path, {
-      method,
-      headers,
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal,
-    });
-  } catch (err) {
-    throw new ApiError(0, "Cannot reach the ParkWise API. Is the backend running?");
-  }
-
-  if (res.status === 401 && auth && token) {
-    setToken(null);
-    setCachedUser(null);
-    if (!window.location.pathname.startsWith("/login")) {
-      window.location.href = "/login";
+  for (let attempt = 1; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(path, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal,
+      });
+    } catch {
+      throw new ApiError(0, "Cannot reach the ParkWise API. Is the backend running?");
     }
-    throw new ApiError(401, "Session expired — please sign in again.");
-  }
 
-  if (!res.ok) {
-    throw new ApiError(res.status, await extractMessage(res));
+    if (res.status === 401 && auth && token) {
+      // A 401 is rejected before the route handler runs, so retrying cannot
+      // repeat a side effect — but it does not mask a genuinely bad token.
+      if (attempt < RETRY_401_ATTEMPTS) {
+        await sleep(RETRY_401_DELAY_MS * attempt);
+        continue;
+      }
+      setToken(null);
+      setCachedUser(null);
+      if (!window.location.pathname.startsWith("/login")) {
+        window.location.href = "/login";
+      }
+      throw new ApiError(401, "Session expired — please sign in again.");
+    }
+
+    if (!res.ok) {
+      throw new ApiError(res.status, await extractMessage(res));
+    }
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
 }
 
 /** API helper that never throws on 404 — returns null instead. */
