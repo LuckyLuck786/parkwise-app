@@ -19,7 +19,7 @@ core.
 
 ```bash
 # 0) one-time setup
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 cd frontend && npm install && cd ..
 
 # 1) seed (idempotent — safe to run twice): 3 lots, 62 bays, 27 users, 14 days of history
@@ -131,6 +131,9 @@ demo data).
   all 15 tables compile for the Postgres dialect (verified).
   Mongo/other non-SQL stores are *not* supported (the schema is relational).
 - **`SECRET_KEY`** is set as a Vercel production environment variable.
+- [requirements.txt](requirements.txt) is the **runtime** set the function
+  installs; [requirements-dev.txt](requirements-dev.txt) adds uvicorn/pytest/httpx
+  for local work (and `uv.lock` pins the deployed set).
 - **SSE:** `/api/v1/events/stream` works where functions allow long-lived
   responses; the frontend falls back to `GET /api/v1/events/poll`
   automatically.

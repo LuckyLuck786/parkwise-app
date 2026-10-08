@@ -1,0 +1,14 @@
+# Local development only.
+#
+# requirements.txt is the minimal RUNTIME set the Vercel Python function installs;
+# it deliberately omits the server and test tools. Install THIS file locally so the
+# quick start in README.md works on a fresh clone:
+#
+#     python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+#
+-r requirements.txt
+
+uvicorn[standard]>=0.30
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx>=0.27
