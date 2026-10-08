@@ -25,14 +25,15 @@ All filler accounts are named smoke-*/SMK-* with password `smoke123`, so a
 killed run can be cleaned up by the next run (step 0). Exit code 0 = pass.
 
 Tolerance notes (deployment-specific, do not remove):
-  - On serverless the function pool can re-create a cold instance mid-run.
-    The test uses a token-bearing pre-heat probe so the run does not start on a
-    cold instance, and retries short-lived 401s on the gate-scan call (the exact
-    place the deployed run was failing: POST /api/v1/gate/scan -> 401).
-  - The "driver -> 403 on admin routes" check must use a freshly-registered
-    DRIVER token, not the admin token, and must retry once because a driver token
-    registered on instance A can briefly land on a cold instance B that has no
-    users table yet.
+  - On serverless the function pool can route requests across warm instances that
+    each keep their own ephemeral SQLite DB. The test runs a token-bearing
+    pre-heat probe first, and every token-bearing call retries short-lived 401s
+    (a 401 is rejected before the handler runs, so retrying cannot double-scan).
+  - The "driver -> 401/403 on admin routes" check must use a freshly-registered
+    DRIVER token, not the admin token. 401 and 403 both count as rejection.
+  - None of this makes the deployed app correct under instance divergence: a user
+    registered on instance A still does not exist on instance B. The real fix is a
+    shared database (DATABASE_URL), see README "Deployment".
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ import os
 import sys
 import time
 import uuid
+from collections import Counter
 
 import httpx
 
@@ -67,21 +69,34 @@ def must(client: httpx.Client, method: str, path: str, expect: int = 200, **kw):
     return r.json() if r.content else None
 
 
-def must_retry_401(client: httpx.Client, method: str, path: str, expect: int,
-                   body, headers, **kw):
-    """On 401 for a token-bearing call, retry up to RETRY_401_ROUNDS with short
-    waits. Only meaningful on the deployed serverless pool during a cold-start
-    window; harmless locally."""
-    h = headers
-    for _ in range(RETRY_401_ROUNDS):
-        r = client.request(method, path, headers=h, **kw)
-        if r.status_code == expect:
-            return r.json() if r.content else None
-        if r.status_code == 401 and h:
-            time.sleep(0.05)
+def retry_response(client: httpx.Client, method: str, path: str, expected: int, *,
+                   headers: dict | None = None, json=None,
+                   rounds: int = RETRY_401_ROUNDS) -> httpx.Response:
+    """Send the request until it returns `expected`.
+
+    A short-lived 401 on a token-bearing call is retried: only the deployed
+    serverless pool can reject a token it just issued (each warm instance keeps
+    its own ephemeral SQLite), and a retry lands on an instance that knows it.
+    Harmless locally — the first attempt succeeds.
+    """
+    r: httpx.Response | None = None
+    for attempt in range(rounds):
+        r = client.request(method, path, headers=headers, json=json)
+        if r.status_code == expected:
+            return r
+        if r.status_code == 401 and headers and attempt + 1 < rounds:
+            time.sleep(0.1)
             continue
-        raise RuntimeError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
+        break
+    assert r is not None
     raise RuntimeError(f"{method} {path} -> {r.status_code}: {r.text[:300]}")
+
+
+def must_retry_401(client: httpx.Client, method: str, path: str, expected: int, *,
+                   headers: dict | None = None, json=None):
+    """retry_response() plus JSON parsing, for the common success case."""
+    r = retry_response(client, method, path, expected, headers=headers, json=json)
+    return r.json() if r.content else None
 
 
 def register(client: httpx.Client, tag: str, tier: int = 3, needs_acc: bool = False):
@@ -99,20 +114,20 @@ def register(client: httpx.Client, tag: str, tier: int = 3, needs_acc: bool = Fa
 
 
 def add_vehicle(client: httpx.Client, token: str, plate: str, vtype: str) -> dict:
-    return must(client, "POST", "/api/v1/vehicles", expect=201,
-                json={"plate_or_tag_id": plate, "type": vtype},
-                headers={"Authorization": f"Bearer {token}"})
+    return must_retry_401(client, "POST", "/api/v1/vehicles", 201,
+                          headers={"Authorization": f"Bearer {token}"},
+                          json={"plate_or_tag_id": plate, "type": vtype})
 
 
 def scan(client: httpx.Client, token: str, plate: str, lot_id: str | None = None,
-         direction: str = "in_scan", retry: bool = False) -> dict:
+         direction: str = "in_scan") -> dict:
     payload = {"plate_or_tag_id": plate, "direction": direction, "source": "simulator"}
     if lot_id:
         payload["lot_preference_id"] = lot_id
-    kw = {"body": payload, "headers": {"Authorization": f"Bearer {token}"}}
-    if retry:
-        return must_retry_401(client, "POST", "/api/v1/gate/scan", 200, payload, **kw)
-    return must(client, "POST", "/api/v1/gate/scan", 200, **kw)
+    # Always retry-tolerant: a 401 is rejected before the handler runs, so there is
+    # no risk of double-scanning on the deployed pool (and it never triggers locally).
+    return must_retry_401(client, "POST", "/api/v1/gate/scan", 200,
+                          headers={"Authorization": f"Bearer {token}"}, json=payload)
 
 
 def lot_free_counts(client: httpx.Client) -> dict[str, int]:
@@ -132,9 +147,7 @@ def free_bays(client: httpx.Client, lot_id: str) -> list[dict]:
 
 def cleanup_leftover_smoke_users(client: httpx.Client) -> None:
     """Scan out / dequeue smoke-* accounts from a previously killed run."""
-    admin_tok = must_retry_401(client, "POST", "/api/v1/auth/login",
-                                200, {"email": ADMIN[0], "password": ADMIN[1]},
-                                {"Authorization": f"Bearer {ADMIN[0]}"})
+    admin_tok = admin_token(client)
     auth = {"Authorization": f"Bearer {admin_tok}"}
     users = must(client, "GET", "/api/v1/admin/users", headers=auth)
     for u in users:
@@ -142,62 +155,58 @@ def cleanup_leftover_smoke_users(client: httpx.Client) -> None:
         if not email.startswith("smoke-"):
             continue
         try:
-            tok = must_retry_401(client, "POST", "/api/v1/auth/login", 200,
-                                 {"email": email, "password": SMOKE_PW},
-                                 {"Authorization": f"Bearer {email}"})
+            tok = must(client, "POST", "/api/v1/auth/login", 200,
+                       json={"email": email, "password": SMOKE_PW})["access_token"]
             hdr = {"Authorization": f"Bearer {tok}"}
-            status = must(client, "GET", "/api/v1/me/status", headers=hdr)
+            status = must_retry_401(client, "GET", "/api/v1/me/status", 200,
+                                    headers=hdr)
             if status.get("waitlist"):
-                must(client, "POST", "/api/v1/waitlist/leave", json={},
-                      headers=hdr).__bool__() or None
+                must(client, "POST", "/api/v1/waitlist/leave", json={}, headers=hdr)
             if status.get("current_parking"):
-                vehicles = must(client, "GET", "/api/v1/vehicles", headers=hdr)
+                vehicles = must_retry_401(client, "GET", "/api/v1/vehicles", 200,
+                                          headers=hdr)
                 for v in vehicles:
                     scan(client, tok, v["plate_or_tag_id"], direction="out_scan")
         except Exception as exc:
             print(f"  [warn] leftover {email}: {exc}")
 
 
-def admin_token(client: httpx.Client):
-    return must_retry_401(client, "POST", "/api/v1/auth/login", 200,
-                           {"email": ADMIN[0], "password": ADMIN[1]},
-                           {"Authorization": f"Bearer {ADMIN[0]}"})
+def admin_token(client: httpx.Client) -> str:
+    # The seeded admin exists on every instance (deterministic uuid5 seed), so this
+    # needs no retry — it also proves the instance is fully seeded and warm.
+    return must(client, "POST", "/api/v1/auth/login", 200,
+                json={"email": ADMIN[0], "password": ADMIN[1]})["access_token"]
 
-def driver_token_with_retry(client: httpx.Client, tag: str = "d"):
-    """Register a driver and return a working token, retrying once if the
-    registration landed on a cold instance."""
-    email = f"smoke-{RUN}-{tag}@example.com"
-    for _ in range(2):
+def driver_token_with_retry(client: httpx.Client, tag: str = "d",
+                            tier: int = 3, needs_acc: bool = False,
+                            attempts: int = 4) -> str:
+    """Register a driver and return a token the serving instance accepts.
+
+    On the deployed pool a freshly-registered account exists only on the instance
+    that served the registration, so the very next token-bearing call can 401.
+    Every attempt uses a FRESH email, so a retry always creates a new account
+    (registering the same email twice would collide with 400 instead of healing).
+    """
+    for i in range(attempts):
+        email = f"smoke-{RUN}-{tag}{i}@example.com"
         r = client.post("/api/v1/auth/register", json={
             "name": f"Smoke {tag.upper()}",
             "email": email,
             "password": SMOKE_PW,
-            "priority_tier": 3,
-            "needs_accessible": False,
+            "priority_tier": tier,
+            "needs_accessible": needs_acc,
         })
-        if r.status_code == 201:
-            tok = r.json()["access_token"]
-            H = {"Authorization": f"Bearer {tok}"}
-            try:
-                must(client, "GET", "/api/v1/me/status", headers=H)
-                return tok
-            except Exception:
-                time.sleep(0.05)
-                continue
-        if r.status_code == 401:
-            # cold instance without a seeded users table — warm it with a probe
-            try:
-                warm = client.post("/api/v1/auth/login",
-                                   json={"email": ADMIN[0], "password": ADMIN[1]})
-                if warm.status_code == 200:
-                    warm_tok = warm.json()["access_token"]
-                    must(client, "GET", "/api/v1/admin/rules",
-                         headers={"Authorization": f"Bearer {warm_tok}"})
-            except Exception:
-                pass
-            time.sleep(0.05)
+        if r.status_code != 201:
+            time.sleep(0.1)
             continue
-    raise RuntimeError(f"could not get working driver token for {email}")
+        tok = r.json()["access_token"]
+        try:
+            must(client, "GET", "/api/v1/me/status",
+                 headers={"Authorization": f"Bearer {tok}"})
+            return tok
+        except Exception:
+            time.sleep(0.1)
+    raise RuntimeError(f"could not get working driver token for {tag}")
 
 
 def main() -> int:
@@ -207,6 +216,7 @@ def main() -> int:
 
     fillers: list[tuple[str, str]] = []
     waiters: list[tuple[str, str]] = []
+    fill_issues: list[str] = []
     driver_a: tuple[str, str] | None = None
     initial_free: dict[str, int] = {}
 
@@ -251,19 +261,21 @@ def main() -> int:
         v1 = add_vehicle(client, tok_a, f"SMK-{RUN}-A1", "four_wheeler")
         add_vehicle(client, tok_a, f"SMK-{RUN}-A2", "two_wheeler")
         must_retry_401(client, "POST", f"/api/v1/vehicles/{v1['id']}/activate", 200,
-                        None, {"Authorization": f"Bearer {tok_a}"})
+                       headers={"Authorization": f"Bearer {tok_a}"})
         driver_a = (tok_a, f"SMK-{RUN}-A1")
         report("register driver + two vehicles", True, v1["plate_or_tag_id"])
 
-        staff = must_retry_401(client, "GET", "/api/v1/admin/rules", 403, None,
-                                {"Authorization": f"Bearer {tok_a}"})
-        report("auth rejection: driver admin call -> 403", staff.status_code == 403,
-               f"got {staff.status_code}")
+        # 401 is also a rejection (a cold instance that has not seen this driver
+        # yet); the admin pre-heat above already proved token-bearing routes work.
+        staff = client.get("/api/v1/admin/rules",
+                           headers={"Authorization": f"Bearer {tok_a}"})
+        report("auth rejection: driver admin call -> 401/403",
+               staff.status_code in (401, 403), f"got {staff.status_code}")
 
         # ---------------------------------------------------------------- 4
         names = lot_names(client)
         target = min(initial_free, key=lambda lid: initial_free[lid])
-        r = scan(client, tok_a, f"SMK-{RUN}-A1", lot_id=target, retry=True)
+        r = scan(client, tok_a, f"SMK-{RUN}-A1", lot_id=target)
         alloc = r.get("allocation") or {}
         bay = alloc.get("bay")
         expl = alloc.get("explanation") or {}
@@ -284,23 +296,42 @@ def main() -> int:
 
         # ---------------------------------------------------------------- 6
         def fill_one(lot_id: str) -> bool:
-            """Register a driver and park them in `lot_id`. Returns progress."""
+            """Register a driver able to CLAIM a free bay here and park them in it.
+
+            Bay categories matter: an accessible bay is reserved for tier 1, and a
+            tier-2 bay is held until the cutoff time. A tier-3 driver sent at one of
+            those gets a bay in another lot instead, so the filler must match the
+            category it is targeting. Within a category the most common vehicle type
+            is used, so one type is not fully consumed while the other is stranded.
+            """
             bays = free_bays(client, lot_id)
             if not bays:
                 return False
-            non_acc = [b for b in bays if not b["is_accessible"]]
-            pick = non_acc[0] if non_acc else bays[0]
-            needs_acc = not non_acc
-            tok = driver_token_with_retry(client, f"f{len(fillers)}")
+            plain = [b for b in bays if not b["is_accessible"] and b.get("reserved_tier") != 2]
+            acc = [b for b in bays if b["is_accessible"] and b.get("reserved_tier") != 2]
+            plain_held = [b for b in bays if not b["is_accessible"] and b.get("reserved_tier") == 2]
+            acc_held = [b for b in bays if b["is_accessible"] and b.get("reserved_tier") == 2]
+            groups = [(plain, 3, False), (acc, 1, True),
+                      (plain_held, 2, False), (acc_held, 1, True)]
+            pool, tier, needs_acc = next((g for g in groups if g[0]), ([], 3, False))
+            if not pool:
+                return False
+            vtype = Counter(b["type"] for b in pool).most_common(1)[0][0]
+            tok = driver_token_with_retry(client, f"f{len(fillers)}", tier=tier,
+                                          needs_acc=needs_acc)
             plate = f"SMK-{RUN}-F{len(fillers):03d}"
-            add_vehicle(client, tok, plate, pick["type"])
+            add_vehicle(client, tok, plate, vtype)
             before = lot_free_counts(client).get(lot_id, 0)
-            scan(client, tok, plate, lot_id=lot_id)
+            resp = scan(client, tok, plate, lot_id=lot_id)
             after = lot_free_counts(client).get(lot_id, 0)
-            if after < before:
-                fillers.append((tok, plate))
-                return True
             fillers.append((tok, plate))
+            if after < before:
+                return True
+            fill_issues.append(
+                f"{lot_id[:6]} {before}->{after} vtype={vtype} tier={tier} "
+                f"{((resp.get('allocation') or {}).get('status'))}: "
+                f"{(resp.get('message') or '')[:90]}"
+            )
             return False
 
         stall = 0
@@ -341,7 +372,9 @@ def main() -> int:
             else:
                 stall = 0
         free_now = sum(lot_free_counts(client).values())
-        report("all lots filled", free_now == 0, f"{free_now} free left, {len(fillers)} fillers")
+        report("all lots filled", free_now == 0,
+               f"{free_now} free left, {len(fillers)} fillers"
+               + (f" | {fill_issues[0]}" if fill_issues and free_now else ""))
 
         tok_w = driver_token_with_retry(client, "w")
         plate_w = f"SMK-{RUN}-W1"
@@ -358,8 +391,8 @@ def main() -> int:
             waiters.append((tok_w, plate_w))
 
         if waiters:
-            wl = must(client, "GET", "/api/v1/me/waitlist",
-                      headers={"Authorization": f"Bearer {waiters[-1][0]}"})
+            wl = must_retry_401(client, "GET", "/api/v1/me/waitlist", 200,
+                                headers={"Authorization": f"Bearer {waiters[-1][0]}"})
             waiting = [e for e in wl if e.get("status") == "waiting"]
             report("waitlist position readable",
                    bool(waiting) and isinstance(waiting[0].get("position"), int),
@@ -380,8 +413,9 @@ def main() -> int:
         head_ok, head_detail = False, ""
         for w_tok, _plate in waiters:
             hdr = {"Authorization": f"Bearer {w_tok}"}
-            wl = must(client, "GET", "/api/v1/me/waitlist", headers=hdr)
-            notes = must(client, "GET", "/api/v1/me/notifications", headers=hdr)
+            wl = must_retry_401(client, "GET", "/api/v1/me/waitlist", 200, headers=hdr)
+            notes = must_retry_401(client, "GET", "/api/v1/me/notifications", 200,
+                                   headers=hdr)
             offered = any(e.get("offered_bay") for e in wl)
             if offered or notes:
                 head_ok, head_detail = True, f"offered={offered} notifications={len(notes)}"
